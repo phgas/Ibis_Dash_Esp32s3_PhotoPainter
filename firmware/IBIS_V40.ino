@@ -57,12 +57,12 @@
 #include <GxEPD2_7C.h>
 
 // Custom fonts
-#include <Fonts/fonnts_com_Maison_Neue_Bold9pt7b.h>
-#include <Fonts/fonnts_com_Maison_Neue_Bold18pt7b.h>
-#include <Fonts/fonnts_com_Maison_Neue_Bold24pt7b.h>
-#include <Fonts/fonnts_com_Maison_Neue_Light9pt7b.h>
-#include <Fonts/fonnts_com_Maison_Neue_Light15pt7b.h>
-#include <Fonts/fonnts_com_Maison_Neue_Light18pt7b.h>
+#include "Fonts/fonnts_com_Maison_Neue_Bold9pt7b.h"
+#include "Fonts/fonnts_com_Maison_Neue_Bold18pt7b.h"
+#include "Fonts/fonnts_com_Maison_Neue_Bold24pt7b.h"
+#include "Fonts/fonnts_com_Maison_Neue_Light9pt7b.h"
+#include "Fonts/fonnts_com_Maison_Neue_Light15pt7b.h"
+#include "Fonts/fonnts_com_Maison_Neue_Light18pt7b.h"
 
 #include <Wire.h>
 #include "XPowersLib.h"
@@ -146,6 +146,46 @@ static const int FACTORY_RESET_HOLD_MS = 5000;
 #define SPORT_HIKE  "Hike"
 #define SPORT_WALK  "Walk"
 
+// ===============================
+// SPORT TYPE GROUPS (top of file)
+// ===============================
+
+// What should count as "Ride" when user selects Ride
+static const char* const RIDE_TYPES[] = {
+  "Ride",
+  "VirtualRide",      // Zwift usually ends up here
+  "EBikeRide",        // optional, but people may want this included
+  "MountainBikeRide"  // optional, but people may want this included
+};
+
+// What should count as "Run" when user selects Run
+static const char* const RUN_TYPES[] = {
+  "Run",
+  "VirtualRun"
+};
+
+// Helper: check if a string equals any string in a list
+bool inList(const String& value, const char* const* list, size_t count) {
+  for (size_t i = 0; i < count; i++) {
+    if (value == list[i]) return true;
+  }
+  return false;
+}
+
+// Main matcher: user selects SPORT_TYPE (Ride/Run/Swim/Hike/Walk)
+// We accept "attached" types for Ride and Run by default.
+// Everything else stays exact-match (compat with your existing logic).
+bool matchesSelectedSport(const String& selected, const String& actType) {
+  if (selected == "Ride") {
+    return inList(actType, RIDE_TYPES, sizeof(RIDE_TYPES) / sizeof(RIDE_TYPES[0]));
+  }
+  if (selected == "Run") {
+    return inList(actType, RUN_TYPES, sizeof(RUN_TYPES) / sizeof(RUN_TYPES[0]));
+  }
+
+  // Default behavior: exact match for other sports
+  return (actType == selected);
+}
 
 // =============================================================================
 // SECTION 4: RTC MEMORY VARIABLES (survive deep sleep)
@@ -221,8 +261,9 @@ String accessToken = "";
 String lastTitle = "";
 String lastLine = "";
 String lastPolyline = "";
-float lastDistKm = 0;        // Last activity distance in km
+float lastDistKm = 0;         // Last activity distance in km
 int lastMovingSecs = 0;       // Last activity moving time in seconds
+int lastAvgWatts = 0;         // Last activity average power (watts) - mainly for rides
 String lastDateStr = "";      // Last activity date e.g. "2 January"
 bool isUsbConnected = false;
 bool wasUsbConnected = false;
@@ -1102,10 +1143,10 @@ void fetchStravaData() {
     lastPolyline = "";
     return;
   }
-  
+
   USBSerial.println("=== Fetching Strava Data ===");
   feedWatchdog();
-  
+
   // Reset stats
   kmDone = 0;
   timeHours = 0;
@@ -1115,17 +1156,18 @@ void fetchStravaData() {
   lastPolyline = "";
   lastDistKm = 0;
   lastMovingSecs = 0;
+  lastAvgWatts = 0;   // <-- added
   lastDateStr = "";
-  
+
   if (accessToken == "") {
     USBSerial.println("No access token");
     return;
   }
-  
+
   // Get timestamp range for tracking period
   long afterTS, beforeTS;
   getTrackingPeriodTimestamps(afterTS, beforeTS);
-  
+
   USBSerial.print("Tracking period: ");
   switch(TRACK_PERIOD) {
     case TRACK_WEEKLY: USBSerial.println("Weekly"); break;
@@ -1134,31 +1176,31 @@ void fetchStravaData() {
   }
   USBSerial.print("Filtering for sport type: ");
   USBSerial.println(SPORT_TYPE);
-  
+
   bool gotLast = false;
   int page = 1;
   int totalActivities = 0;  // Track all activities fetched
-  
+
   while (true) {
     feedWatchdog();
-    
+
     HTTPClient http;
     String req = "https://www.strava.com/api/v3/athlete/activities?";
     req += "after=" + String(afterTS) + "&before=" + String(beforeTS);
     req += "&per_page=30&page=" + String(page);
-    
+
     http.begin(req);
     http.addHeader("Authorization", "Bearer " + accessToken);
-    
+
     int code = http.GET();
-    
+
     if (code != 200) {
       USBSerial.print("API error: ");
       USBSerial.println(code);
       http.end();
       break;
     }
-    
+
     String payload = http.getString();
 
     // Only parse the fields we need — drastically reduces memory usage
@@ -1169,6 +1211,7 @@ void fetchStravaData() {
     filter[0]["distance"] = true;
     filter[0]["moving_time"] = true;
     filter[0]["map"]["summary_polyline"] = true;
+    filter[0]["average_watts"] = true;   // <-- added
 
     JsonDocument doc;
 
@@ -1177,32 +1220,32 @@ void fetchStravaData() {
       http.end();
       break;
     }
-    
+
     if (!doc.is<JsonArray>()) {
       USBSerial.println("Response is not an array");
       http.end();
       break;
     }
-    
+
     JsonArray arr = doc.as<JsonArray>();
-    
+
     if (arr.size() == 0) {
       USBSerial.println("No more activities");
       http.end();
       break;
     }
-    
+
     USBSerial.print("Page ");
     USBSerial.print(page);
     USBSerial.print(": ");
     USBSerial.print(arr.size());
     USBSerial.println(" activities");
-    
+
     for (JsonObject act : arr) {
       totalActivities++;
-      
+
       String actType = act["type"].as<String>();
-      
+
       // Debug: show what we're comparing
       if (totalActivities <= 3) {
         USBSerial.print("  Activity type: '");
@@ -1211,25 +1254,25 @@ void fetchStravaData() {
         USBSerial.print(SPORT_TYPE);
         USBSerial.println("'");
       }
-      
-      // Filter by selected sport type - EXACT MATCH (case-sensitive)
-      if (actType == SPORT_TYPE) {
+
+      // Filter by selected sport type (includes virtual variants for Ride/Run)
+      if (matchesSelectedSport(SPORT_TYPE, actType)) {
         if (!gotLast) {
           // Get last activity details with validation
           lastTitle = act["name"].as<String>();
           if (lastTitle.length() == 0) {
             lastTitle = "Untitled " + SPORT_TYPE;
           }
-          
+
           String dt = act["start_date_local"].as<String>();
-          
+
           // Parse date into "2 February" format
           // dt format from Strava: "2025-01-02T14:30:00Z"
           if (dt.length() >= 10) {
             int month = dt.substring(5, 7).toInt();
             int day = dt.substring(8, 10).toInt();
-            const char* monthNames[] = {"January", "February", "March", "April", 
-                                        "May", "June", "July", "August", 
+            const char* monthNames[] = {"January", "February", "March", "April",
+                                        "May", "June", "July", "August",
                                         "September", "October", "November", "December"};
             if (month >= 1 && month <= 12) {
               lastDateStr = String(day) + " " + monthNames[month - 1];
@@ -1239,28 +1282,36 @@ void fetchStravaData() {
           } else {
             lastDateStr = dt;
           }
-          
+
           float dkm = act["distance"].as<float>() / 1000.0;
           int movingSecs = act["moving_time"].as<int>();
           float hrs = movingSecs / 3600.0;
-          
+
           // Validate the numbers are real
           if (dkm > 0 && dkm < 1000 && hrs > 0 && hrs < 100) {
             lastDistKm = dkm;
             lastMovingSecs = movingSecs;
             lastLine = String(dkm, 1) + " km  " + String(hrs, 1) + "h  " + lastDateStr;
+
+            // Capture average power when available
+            if (!act["average_watts"].isNull()) {
+              lastAvgWatts = (int)act["average_watts"].as<float>();
+            } else {
+              lastAvgWatts = 0;
+            }
+
             gotLast = true;
-            
+
             if (!act["map"]["summary_polyline"].isNull()) {
               lastPolyline = act["map"]["summary_polyline"].as<String>();
             }
           }
         }
-        
+
         // Accumulate stats with validation
         float distance = act["distance"].as<float>() / 1000.0;
         float time = act["moving_time"].as<float>() / 3600.0;
-        
+
         // Only add if values are reasonable
         if (distance > 0 && distance < 1000 && time > 0 && time < 100) {
           kmDone += distance;
@@ -1269,19 +1320,19 @@ void fetchStravaData() {
         }
       }
     }
-    
+
     http.end();
     page++;
-    
+
     // Safety: don't fetch more than 10 pages
     if (page > 10) {
       USBSerial.println("Reached max pages (10)");
       break;
     }
-    
+
     delay(200);  // Be nice to Strava API
   }
-  
+
   // Update timestamp
   struct tm timeinfo;
   if (getLocalTime(&timeinfo)) {
@@ -1290,14 +1341,14 @@ void fetchStravaData() {
     lastUpdateTime = String(timeStr);
     lastStravaFetchEpoch = mktime(&timeinfo);
   }
-  
+
   USBSerial.println("=== Strava Fetch Complete ===");
   USBSerial.print("Total activities fetched: "); USBSerial.println(totalActivities);
   USBSerial.print("Matching activities ("); USBSerial.print(SPORT_TYPE); USBSerial.print("): ");
   USBSerial.println(activitiesCount);
   USBSerial.print("Distance: "); USBSerial.print(kmDone, 1); USBSerial.println(" km");
   USBSerial.print("Time: "); USBSerial.print(timeHours, 1); USBSerial.println(" hours");
-  
+
   // Validate we got reasonable data
   if (totalActivities > 0 && activitiesCount == 0) {
     USBSerial.println("WARNING: Got activities but none matched sport type!");
@@ -1644,37 +1695,49 @@ void drawDashboard() {
     int col1X = margin + innerPad;
     int col2X = margin + innerPad + (latestW - 2 * innerPad) / 3;
     int col3X = margin + innerPad + 2 * (latestW - 2 * innerPad) / 3;
-    
+
     display.setFont(&fonnts_com_Maison_Neue_Bold9pt7b);
     display.setTextColor(GxEPD_BLACK);
     display.setCursor(col1X, colHeaderY);
     display.print("Distance");
     display.setCursor(col2X, colHeaderY);
-    display.print("Pace");
+    if (SPORT_TYPE == "Ride") display.print("Avg. Power");
+    else display.print("Pace");
     display.setCursor(col3X, colHeaderY);
     display.print("Time");
-    
-    // Row 4: Values - positioned relative to column headers
-    int valY = colHeaderY + headerGapSmall;  // Position relative to headers above
+
+    // Row 4: Values
+    int valY = colHeaderY + headerGapSmall;
     display.setFont(&fonnts_com_Maison_Neue_Light15pt7b);
     display.setTextColor(GxEPD_BLACK);
-    
+
     if (lastDistKm > 0) {
+      // Distance
       display.setCursor(col1X, valY);
       display.print(String(lastDistKm, 2) + " km");
-      
+
+      // Pace OR Power (dynamic)
       display.setCursor(col2X, valY);
-      if (lastDistKm > 0.01) {
-        int totalPaceSecs = (int)(lastMovingSecs / lastDistKm);
-        int paceMin = totalPaceSecs / 60;
-        int paceSec = totalPaceSecs % 60;
-        char paceBuf[12];
-        snprintf(paceBuf, sizeof(paceBuf), "%d:%02d /km", paceMin, paceSec);
-        display.print(paceBuf);
+      if (SPORT_TYPE == "Ride") {
+        if (lastAvgWatts > 0) {
+          display.print(String(lastAvgWatts) + " W");
+        } else {
+          display.print("--");
+        }
       } else {
-        display.print("--");
+        if (lastDistKm > 0.01) {
+          int totalPaceSecs = (int)(lastMovingSecs / lastDistKm);
+          int paceMin = totalPaceSecs / 60;
+          int paceSec = totalPaceSecs % 60;
+          char paceBuf[12];
+          snprintf(paceBuf, sizeof(paceBuf), "%d:%02d /km", paceMin, paceSec);
+          display.print(paceBuf);
+        } else {
+          display.print("--");
+        }
       }
-      
+
+      // Time
       display.setCursor(col3X, valY);
       int totalMin = lastMovingSecs / 60;
       int timeSec = lastMovingSecs % 60;
@@ -1689,15 +1752,13 @@ void drawDashboard() {
         snprintf(timeBuf, sizeof(timeBuf), "%dm %02ds", totalMin, timeSec);
         display.print(timeBuf);
       }
+
     } else {
-      display.setCursor(col1X, valY);
-      display.print("--");
-      display.setCursor(col2X, valY);
-      display.print("--");
-      display.setCursor(col3X, valY);
-      display.print("--");
-    }
-    
+      display.setCursor(col1X, valY); display.print("--");
+      display.setCursor(col2X, valY); display.print("--");
+      display.setCursor(col3X, valY); display.print("--");
+    }    
+
     // ===== STATUS INDICATOR =====
     char displayStr[40];
     
@@ -2680,5 +2741,4 @@ void loop() {
   
   delay(100);
 }
-
 
