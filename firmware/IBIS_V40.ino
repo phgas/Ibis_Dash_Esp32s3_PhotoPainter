@@ -134,6 +134,8 @@ static const int FACTORY_RESET_HOLD_MS = 5000;
 
 #define uS_TO_S_FACTOR 1000000ULL
 
+#define KILOMETERS true
+
 // Tracking period options
 #define TRACK_YEARLY   0
 #define TRACK_MONTHLY  1
@@ -198,7 +200,7 @@ RTC_DATA_ATTR time_t lastNtpSyncEpoch = 0;  // Track when we last synced NTP
 RTC_DATA_ATTR int dashYear = 0;
 RTC_DATA_ATTR int dashMonth = 0;
 RTC_DATA_ATTR int dashWeek = 0;
-RTC_DATA_ATTR float kmDone = 0;
+RTC_DATA_ATTR float distDone = 0;
 RTC_DATA_ATTR float timeHours = 0;
 RTC_DATA_ATTR int activitiesCount = 0;
 RTC_DATA_ATTR int rapidBootCount = 0;
@@ -215,6 +217,7 @@ RTC_DATA_ATTR time_t tokenExpiresAt = 0;
 XPowersAXP2101 PMU;
 Preferences preferences;
 String serialInputBuffer = "";
+String distUnit = KILOMETERS ? "km" : "mi";
 
 GxEPD2_7C<GxEPD2_730c_GDEP073E01, GxEPD2_730c_GDEP073E01::HEIGHT> display(
   GxEPD2_730c_GDEP073E01(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY)
@@ -261,7 +264,7 @@ String accessToken = "";
 String lastTitle = "";
 String lastLine = "";
 String lastPolyline = "";
-float lastDistKm = 0;         // Last activity distance in km
+float lastDist = 0;        // Last activity distance in km/mi (dependent on KILOMETERS value)
 int lastMovingSecs = 0;       // Last activity moving time in seconds
 int lastAvgWatts = 0;         // Last activity average power (watts) - mainly for rides
 String lastDateStr = "";      // Last activity date e.g. "2 January"
@@ -361,7 +364,7 @@ void loadConfiguration() {
   USBSerial.print("  WiFi SSID: "); USBSerial.println(WIFI_SSID.length() > 0 ? WIFI_SSID : "(not set)");
   USBSerial.print("  User Name: "); USBSerial.println(USER_NAME.length() > 0 ? USER_NAME : "(not set)");
   USBSerial.print("  Sport Type: "); USBSerial.println(SPORT_TYPE);
-  USBSerial.print("  Goal: "); USBSerial.print(YEARLY_GOAL); USBSerial.println(" km");
+  USBSerial.print("  Goal: "); USBSerial.print(YEARLY_GOAL); USBSerial.println(distUnit);
   USBSerial.print("  Refresh Hours: "); USBSerial.println(REFRESH_HOURS);
   USBSerial.print("  Track Period: "); 
   switch(TRACK_PERIOD) {
@@ -448,7 +451,7 @@ bool checkFactoryReset() {
         bootCount = 0;
         rapidBootCount = 0;
         lastStravaFetchEpoch = 0;
-        kmDone = 0;
+        distDone = 0;
         timeHours = 0;
         activitiesCount = 0;
         
@@ -1135,7 +1138,7 @@ void getTrackingPeriodTimestamps(long &afterTS, long &beforeTS) {
 void fetchStravaData() {
   if (!hasStravaCredentials()) {
     USBSerial.println("No Strava credentials - using placeholder data");
-    kmDone = 0;
+    distDone = 0;
     timeHours = 0;
     activitiesCount = 0;
     lastTitle = "No Strava";
@@ -1148,13 +1151,13 @@ void fetchStravaData() {
   feedWatchdog();
 
   // Reset stats
-  kmDone = 0;
+  distDone = 0;
   timeHours = 0;
   activitiesCount = 0;
   lastTitle = "";
   lastLine = "";
   lastPolyline = "";
-  lastDistKm = 0;
+  lastDist = 0;
   lastMovingSecs = 0;
   lastAvgWatts = 0;   // <-- added
   lastDateStr = "";
@@ -1289,7 +1292,7 @@ void fetchStravaData() {
 
           // Validate the numbers are real
           if (dkm > 0 && dkm < 1000 && hrs > 0 && hrs < 100) {
-            lastDistKm = dkm;
+            lastDist = KILOMETERS ? dkm : (dkm * 0.62);
             lastMovingSecs = movingSecs;
             lastLine = String(dkm, 1) + " km  " + String(hrs, 1) + "h  " + lastDateStr;
 
@@ -1314,7 +1317,7 @@ void fetchStravaData() {
 
         // Only add if values are reasonable
         if (distance > 0 && distance < 1000 && time > 0 && time < 100) {
-          kmDone += distance;
+          distDone += KILOMETERS ? distance : (distance * 0.62);
           timeHours += time;
           activitiesCount++;
         }
@@ -1346,7 +1349,7 @@ void fetchStravaData() {
   USBSerial.print("Total activities fetched: "); USBSerial.println(totalActivities);
   USBSerial.print("Matching activities ("); USBSerial.print(SPORT_TYPE); USBSerial.print("): ");
   USBSerial.println(activitiesCount);
-  USBSerial.print("Distance: "); USBSerial.print(kmDone, 1); USBSerial.println(" km");
+  USBSerial.print("Distance: "); USBSerial.print(distDone, 1); USBSerial.println(distUnit);
   USBSerial.print("Time: "); USBSerial.print(timeHours, 1); USBSerial.println(" hours");
 
   // Validate we got reasonable data
@@ -1453,7 +1456,7 @@ void drawDashboard() {
   feedWatchdog();
   
   // Calculate progress
-  float pct = (YEARLY_GOAL > 0) ? (kmDone / YEARLY_GOAL) : 0;
+  float pct = (YEARLY_GOAL > 0) ? (distDone / YEARLY_GOAL) : 0;
   if (pct > 1) pct = 1;
   if (pct < 0) pct = 0;
   
@@ -1526,7 +1529,13 @@ void drawDashboard() {
     display.setFont(&fonnts_com_Maison_Neue_Light15pt7b);
     display.setTextColor(GxEPD_BLACK);
     display.setCursor(margin + innerPad, distValueY);
-    display.print(String(kmDone, 1) + " km / " + String((int)YEARLY_GOAL) + " km");
+    display.print(String(distDone, 1) 
+      + " "
+      + distUnit
+      + " / "
+      + String((int)YEARLY_GOAL)
+      + " " 
+      + distUnit);
     
     // Progress bar
     int barX = margin + innerPad;
@@ -1541,13 +1550,17 @@ void drawDashboard() {
       display.fillRect(barX + 2, barY + 2, fillW, barH - 4, GxEPD_GREEN);
     }
     
-    float kmToGo = YEARLY_GOAL - kmDone;
-    if (kmToGo < 0) kmToGo = 0;
+    float distToGo = YEARLY_GOAL - distDone;
+    if (distToGo < 0) distToGo = 0;
     int pctTextY = barY + barH + barGapBelow;
     display.setFont(&fonnts_com_Maison_Neue_Bold9pt7b);
     display.setTextColor(GxEPD_BLACK);
     display.setCursor(barX, pctTextY);
-    display.print(String(pct * 100, 1) + "% of goal  " + String(kmToGo, 1) + " km to go");
+    display.print(String(pct * 100, 1) 
+      + "% of goal  " 
+      + String(distToGo, 1) 
+      + distUnit
+      + " to go");
     
     // ===== RUNS / TIME / LAST ROUTE =====
     int runsLabelY = pctTextY + sectionGap;  // 280
@@ -1710,20 +1723,19 @@ void drawDashboard() {
     int valY = colHeaderY + headerGapSmall;
     display.setFont(&fonnts_com_Maison_Neue_Light15pt7b);
     display.setTextColor(GxEPD_BLACK);
-
-    if (lastDistKm > 0) {
-      // Distance
+    
+    if (lastDist > 0) {
       display.setCursor(col1X, valY);
-      display.print(String(lastDistKm, 2) + " km");
-
-      // Pace OR Power (dynamic)
+      display.print(String(lastDist, 2) + distUnit);
+      
       display.setCursor(col2X, valY);
-      if (SPORT_TYPE == "Ride") {
-        if (lastAvgWatts > 0) {
-          display.print(String(lastAvgWatts) + " W");
-        } else {
-          display.print("--");
-        }
+      if (lastDist > 0.01) {
+        int totalPaceSecs = (int)(lastMovingSecs / lastDist);
+        int paceMin = totalPaceSecs / 60;
+        int paceSec = totalPaceSecs % 60;
+        char paceBuf[12];
+        snprintf(paceBuf, sizeof(paceBuf), KILOMETERS ? "%d:%02d /km" : "%d:%02d /mi", paceMin, paceSec);
+        display.print(paceBuf);
       } else {
         if (lastDistKm > 0.01) {
           int totalPaceSecs = (int)(lastMovingSecs / lastDistKm);
@@ -1851,13 +1863,13 @@ bool fetchStravaDataWithValidation() {
   // Step 5: Validate results
   USBSerial.println("Step 5: Validating results...");
   USBSerial.print("  Activities: "); USBSerial.println(activitiesCount);
-  USBSerial.print("  Distance: "); USBSerial.print(kmDone, 1); USBSerial.println(" km");
+  USBSerial.print("  Distance: "); USBSerial.print(distDone, 1); USBSerial.println(distUnit);
   USBSerial.print("  Time: "); USBSerial.print(timeHours, 1); USBSerial.println(" hours");
   
   // Data is valid if:
   // - We have at least fetched (even 0 activities is valid)
   // - Numbers are reasonable (not negative, not insanely large)
-  bool dataValid = (kmDone >= 0 && kmDone < 100000 && 
+  bool dataValid = (distDone >= 0 && distDone < 100000 && 
                     timeHours >= 0 && timeHours < 50000 &&
                     activitiesCount >= 0 && activitiesCount < 10000);
   
@@ -2024,7 +2036,7 @@ void processSerialCommand(String command) {
           
           USBSerial.println("STRAVA_OK");
           USBSerial.print("Activities: "); USBSerial.println(activitiesCount);
-          USBSerial.print("Distance: "); USBSerial.print(kmDone); USBSerial.println(" km");
+          USBSerial.print("Distance: "); USBSerial.print(distDone); USBSerial.println(distUnit);
           USBSerial.print("Time: "); USBSerial.print(timeHours); USBSerial.println(" hours");
           
           // Update battery and draw
@@ -2197,7 +2209,7 @@ void wipeConfig() {
   isConfigured = false;
   
   // Clear RTC data
-  kmDone = 0;
+  distDone = 0;
   timeHours = 0;
   activitiesCount = 0;
   lastStravaFetchEpoch = 0;
@@ -2208,7 +2220,7 @@ void wipeConfig() {
   lastLine = "";
   lastPolyline = "";
   lastUpdateTime = "";
-  lastDistKm = 0;
+  lastDist = 0;
   lastMovingSecs = 0;
   lastDateStr = "";
   
